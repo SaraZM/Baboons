@@ -128,15 +128,15 @@ xy_p2 <-xy[118521:237041,]
 
 # In the following step we just read the output from the data and we merge it with the precious one to keep both systems
 locsutm <- read.csv("/home/sara/Documentos/Third_Rotation/BaboonsV2/locations_utm2.csv" )
-#locs <- data.frame(locs,locsutm)
-     intervals <- data.frame(intervals,locsutm)
+locs <- data.frame(locs,locsutm)
+#intervals <- data.frame(intervals,locsutm)
 #write.csv(locs, "/home/sara/Documentos/Third_Rotation/BaboonsV2/UD/locations_utm.csv", quote=FALSE, row.names = FALSE)
 ```
 
 Then, since the data is too heavy and we just need a constant interval we read the location every minute.
 ```{r}
-#interval <- 60
-#intervals <- locs[seq(1,nrow(locs), interval),]
+interval <- 60
+intervals <- locs[seq(1,nrow(locs), interval),]
 
 #Define the time when the baboons are eating and sleeping
 intervals_food <- intervals[!(hour(intervals$GMT)==2 | hour(intervals$GMT)==3 | hour(intervals$GMT)== 14  ),]
@@ -261,11 +261,9 @@ Fit CTMC Model for each path (in this case each day), the discrete space path is
 locs <- intervals
 
 glm.list=list()
-paths <- locs[]
 
 P=6
-Baboons <- levels(as.factor(locs$Deploy_ID))
-for (j in 1:6)
+
 for(i in 1:P){
   new_locs <- locs[locs$Date==days[i],]
   my_path <- list(xy=as.matrix(new_locs[,7:8]), t=as.vector(1:nrow(new_locs)))
