@@ -109,7 +109,7 @@ Then we load the data that we need. In this first approach we use the data from 
 
 ```{r}
 # The data has already been split in another file so we just have to upload that one
-locs <- read.csv("/home/sara/Documentos/Third_Rotation/BaboonsV2/6Days6Baboons")
+locs <- read.csv("/home/sara/Documentos/Third_Rotation/CTMC/Baboon1_6days.csv")
 locs$GMT <- as.POSIXct(locs$GMT) %>%  ymd_hms()
 days <- levels(locs$Date)
 
@@ -127,7 +127,7 @@ xy_p2 <-xy[118521:237041,]
 #write.csv(xy_p2, "/home/sara/Documentos/Third_Rotation/CTDS/locations_part2.csv", quote=FALSE, row.names = FALSE)
 
 # In the following step we just read the output from the data and we merge it with the precious one to keep both systems
-locsutm <- read.csv("/home/sara/Documentos/Third_Rotation/BaboonsV2/locations_utm2.csv" )
+locsutm <- read.csv("/home/sara/Documentos/Third_Rotation/BaboonsV2/locations_utm.csv" )
 locs <- data.frame(locs,locsutm)
 #intervals <- data.frame(intervals,locsutm)
 #write.csv(locs, "/home/sara/Documentos/Third_Rotation/BaboonsV2/UD/locations_utm.csv", quote=FALSE, row.names = FALSE)
