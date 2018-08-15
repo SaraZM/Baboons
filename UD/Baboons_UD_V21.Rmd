@@ -1,0 +1,341 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+# Overview
+This is a reproduction of the ctmcUD Tutorial by Kenady Wilson, Ephraim Hanks, and Devin Johnson, applied to the baboons data from
+The general steps are:
+
+# Table of contents 
+1. [Set Global Environment and load the telemetry data](#set-global-environment-and-load-the-telemetry-data)
+2. [Create and load covariate rasters](#create-and-load-covariate-rasters)
+3. [Estimate the CTMC model parameters using ctmcmove](#estimate-the-ctmc-model-parameters-using-ctmcmove)
+4. [Calculate the UD](#calculate-the-ud)
+
+## Set Global Environment and load the telemetry data
+We are going to be using the library ctmcmove to .....
+
+```{r, include=FALSE, cache=FALSE}
+library(raster)
+library(dplyr)
+library(lubridate)
+library(ctmcmove)
+library(ggplot2)
+library(viridis)
+library(beepr)
+library(sp)
+library(rgdal)
+
+```
+
+We have to fix FindCenters function from bla bla bla package to find the sleeping centers and food resources.
+
+```{r , echo=FALSE}
+FindCenters = function(ani, max.dist= 8, max.time.dist = 8, mintime = min(ani$GMT),maxtime = max(ani$GMT),min.time.dist=5){
+  
+  #ani$GMT <- ymd_hms(ani$GMT) %>% strftime(format="%H:%M:%S")
+  # split them by days first
+  coords=data.frame(ani$X,ani$Y)
+  t = ani$GMT
+  t.idx= seq(TRUE,nrow(ani))
+  # Distance between locations
+  dmat = as.matrix(dist(coords))
+  diag(dmat) <- NA
+  dmat[upper.tri(dmat)] <- NA
+  
+  # Intervals in time
+  reference <- as.POSIXct("2012-07-01 12:00:00")
+  dist_min <- difftime(ani$GMT,reference, units = "mins")
+  dmat.time <- as.matrix(dist(dist_min))
+  diag(dmat.time) <- NA
+  dmat.time[upper.tri(dmat.time)] <- NA
+  
+  
+  N=ncol(dmat)
+  n = ncol(dmat.time)
+  #ones = matrix(1, n, n)
+  pairs=which(dmat<max.dist & min.time.dist < dmat.time & dmat.time<max.time.dist,arr.ind=T)
+  pts=unique(pairs[,1])
+  pairs.cluster=rep(0,nrow(pairs))
+  points.cluster=rep(0,nrow(coords))
+  
+  cluster=list()
+  
+  no.pairs=0
+  clust.index=1
+  while(no.pairs==0){
+    stop.idx=0
+    seed=which(pairs.cluster==0)[1]
+    c.idx=as.vector(pairs[seed,])
+    pairs.cluster[which(pairs[,1]==c.idx[1] & pairs[,2]==c.idx[2])] <- clust.index
+    while(stop.idx==0){      
+      points.cluster[c.idx] <- clust.index
+      clust.mean=apply(coords[c.idx,],2,mean)
+      d.clust=as.matrix(dist(rbind(clust.mean,coords)))[-1,1]
+      d.clust[points.cluster>0] <- NA
+      candidate=which.min(d.clust)  
+      if(length(candidate)>0 & d.clust[candidate]<max.dist & difftime(t[candidate],t[c.idx[length(c.idx)]],units = "mins")<max.time.dist & difftime(t[candidate],t[c.idx[length(c.idx)]],units = "mins")>min.time.dist){
+        c.idx=c(c.idx,candidate)
+        points.cluster[candidate] <- clust.index
+      }
+      else{
+        stop.idx=1
+        cluster[[clust.index]] <- clust.mean        
+      }
+    }
+    pairs.cluster[apply(matrix(pairs %in% c.idx,ncol=2),1,sum)>0] <- clust.index
+    clust.index=clust.index+1
+    if(length(which(pairs.cluster==0))==0){
+      no.pairs=1
+    }
+  }
+  
+  clusters=c(NA,NA)
+  for(j in 1:length(cluster)){
+    clusters=rbind(clusters,cluster[[j]])
+  }
+  clusters=clusters[-1,]
+  
+  list(clusters=clusters,coords=coords,points.cluster=points.cluster)
+  
+  
+}
+
+```
+
+Then we load the data that we need. In this first approach we use the data from one Baboon during 6 non consecutive days because those days are complete for that baboon so we have a continuous path and we don't have to do imputation. 
+
+```{r}
+# The data has already been split in another file so we just have to upload that one
+locs <- read.csv("/home/sara/Documentos/Third_Rotation/BaboonsV2/6Days6Baboons.csv")
+locs$GMT <- as.POSIXct(locs$GMT) %>%  ymd_hms()
+days <- levels(locs$Date)
+baboons <- levels(as.factor(locs$Deploy_ID))
+
+names(locs) <- c("event.id","GMT","X","Y","Deploy_ID","Date" )
+
+
+```
+
+Since our data is in long-lat format to use the functions in ctmcmove we have to change it to the UTM system. That step is done in a webpage (http://www.zonums.com/online/coords/cotrans.php?module=13)
+ but we have to split the data because it is too big for the website to convert it.
+
+```{r}
+
+coordinates(locs) <- c("X", "Y")
+proj4string(locs) <- CRS("+proj=longlat +datum=WGS84")  ## for example
+
+locs <- spTransform(locs, CRS("+proj=utm +zone=37 +south=T  ellps=WGS84"))
+locs <- as.data.frame(locs)
+```
+
+Then, since the data is too heavy and we just need a constant interval we read the location every minute.
+```{r}
+interval <- 30
+intervals <- locs[seq(1,nrow(locs), interval),]
+
+#Define the time when the baboons are eating and sleeping
+intervals_food <- intervals[!(hour(intervals$GMT)==2 | hour(intervals$GMT)==3 | hour(intervals$GMT)== 14  ),]
+intervals_sleep <- intervals[hour(intervals$GMT)==2 | hour(intervals$GMT)==3 | hour(intervals$GMT)== 14 ,]
+
+```
+
+## Create and load covariate rasters
+
+We load the raster that contains the vegetation density which was precouisly procesed in QGIS.
+```{r}
+#d2trees <- raster("/home/sara/Documentos/Third_Rotation/BaboonsV2/layers_lower/Distancefromtrees.tif")
+#projection(d2trees) <- "+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs "
+
+d2trees <- raster("/home/sara/Documentos/Third_Rotation/BaboonsV2/layers_lower/Distancefromtrees.tif")
+projection(d2trees) <- "+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs "
+
+#plot(trees)
+D2trees <- as.data.frame(raster::rasterToPoints(d2trees));
+names(D2trees) <- c('x','y','Distance')
+trees <- ggplot(D2trees,aes(x/1000,y/1000)) + geom_raster(aes(fill=Distance)) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='Distance to trees',fill='Distance')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+trees
+# 
+#d2clearing <- raster("/home/sara/Documentos/Third_Rotation/BaboonsV2/layers_lower/Distancefromclearing.tif")
+
+d2clearing <- raster("/home/sara/Documentos/Third_Rotation/BaboonsV2/layers_lower/Distancefromclearing.tif")
+#
+projection(d2clearing) <- "+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs "
+
+D2clearing <- as.data.frame(raster::rasterToPoints(d2clearing));
+names(D2clearing) <- c('x','y','Distance')
+clearing <- ggplot(D2clearing,aes(x/1000,y/1000)) + geom_raster(aes(fill=Distance)) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='Distance to clearing',fill='Distance')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+clearing
+
+# clearing <- raster("/home/sara/Documentos/Third_Rotation/BaboonsV2/layers/Clear_Areas.tif")
+# projection(clearing) <- "+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs "
+# 
+# 
+# Clearing <- as.data.frame(raster::rasterToPoints(clearing));
+# names(Clearing) <- c('x','y','Distance')
+# #Clear <- ggplot(Clearing,aes(x/1000,y/1000)) + geom_raster(aes(fill=log(Distance))) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='Distance to clearing',fill='Distance')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+# #Clear
+# 
+
+
+d2trail <- raster("/home/sara/Documentos/Third_Rotation/BaboonsV2/layers_lower/Distancefromtrail.tif")
+projection(d2trail) <- "+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs "
+
+#plot(trees)
+D2trail <- as.data.frame(raster::rasterToPoints(d2trail));
+names(D2trail) <- c('x','y','Distance')
+
+trail <- ggplot(D2trail,aes(x/1000,y/1000)) + geom_raster(aes(fill=Distance)) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='Distance to trail',fill='Distance')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+
+trail
+
+```
+
+Then we create a dummy covariate that will help us calculate the distance to food and distance to sleep sites
+```{r}
+intercept <- d2trees
+values(intercept) <- 1
+plot(intercept)
+```
+Then we calculate the food resources and sleeping sites according to the time the baboons spend in certain sites and the distance between each consecutive point.
+
+```{r}
+# Food resources
+# food_cl=FindCenters(intervals_food,max.dist=1.5,max.time.dist=4,min.time.dist=1.5)
+# 
+# food <- intercept
+# values(food) <- NA
+# cent.cells=cellFromXY(food,food_cl$clusters)
+# values(food)[cent.cells] <- 0
+# d2food=distance(food)
+# projection(d2food) <- CRS("+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs ")
+# 
+# D2food <- as.data.frame(raster::rasterToPoints(d2food));
+# names(D2food) <- c('x','y','Distance') 
+# dfo <- ggplot(D2food,aes(x/1000,y/1000)) + geom_raster(aes(fill=log(Distance))) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='Distance to food',fill='Distance')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+# dfo
+# 
+# writeRaster(d2food, "/home/sara/Documentos/Third_Rotation/BaboonsV2/layers/distance_to_food.tif", overwrite=TRUE)
+# write.csv(food_cl$clusters,"/home/sara/Documentos/Third_Rotation/BaboonsV2/points/food_clusters.csv" )
+
+# Sleeping sites
+sleep_cl=FindCenters(intervals_sleep,max.dist=0.3,max.time.dist=1800,min.time.dist=3)
+
+sleepsite <- intercept
+values(sleepsite) <- NA
+cent.cells=cellFromXY(sleepsite,sleep_cl$clusters)
+values(sleepsite)[cent.cells] <- 0
+d2sleep=distance(sleepsite)
+projection(d2sleep) <- CRS("+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs ")
+
+D2sleep <- as.data.frame(raster::rasterToPoints(d2sleep));
+names(D2sleep) <- c('x','y','Distance') 
+ds <- ggplot(D2sleep,aes(x/1000,y/1000)) + geom_raster(aes(fill=log(Distance))) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='Distance to sleep',fill='Distance')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+ds
+
+writeRaster(d2sleep, "/home/sara/Documentos/Third_Rotation/BaboonsV2/layers/distance_to_sleep.tif", overwrite=TRUE)
+write.csv(sleep_cl$clusters,"/home/sara/Documentos/Third_Rotation/BaboonsV2/points/sleep_clusters.csv" )
+
+```
+
+
+Then we prepare two stacks one with the directional covariates (grad.stack) and another one with motility covariates (loc.stack).
+
+```{r}
+loc.stack = stack( intercept, d2trees,d2clearing)
+names(loc.stack) <- c("intercept","d2trees", "d2clearing" )
+
+grad.stack=stack( d2sleep,d2clearing)
+names(grad.stack) <- c("d2sleep", "d2clearing")
+
+```
+
+## Estimate the CTMC model parameters using ctmcmove
+Fit CTMC Model for each path (in this case each day), the discrete space path is extracted along with cell residence times using path2ctmc() in the ctmcmove package. Hanks et al. (2015) showed that inference on CTMC parameters can be made by rewriting the CTMC likelihood into a form proportional to a Poisson GLM likelihood. The necessary transformation of each CTMC path is faciliated through ctmc2glm().
+
+Since now we have 6 baboons in 6 different days we split them so each one is a different path
+```{r}
+k =1
+for (i in baboons){
+  for (j in days){
+    locs[locs$Date == j & locs$Deploy_ID == i, "path"] <- k
+    k = k + 1
+  }
+  
+}
+```
+
+```{r}
+
+glm.list=list()
+
+for(i in 1:36){
+  new_locs <- locs[locs$path==i,]
+  my_path <- list(xy=as.matrix(new_locs[,5:6]), t=as.vector(1:nrow(new_locs)))
+  crop_lim = extent(c(range(my_path$xy[,1])+c(-5000,5000), range(my_path$xy[,2])+c(-5000,5000)))
+  crop_intercept = crop(intercept, crop_lim)
+  ctmc=path2ctmc(my_path$xy,my_path$t,crop_intercept)
+  grad.stack_crop = crop(grad.stack,crop_lim)
+  names(grad.stack_crop) = paste0(names(grad.stack), "_grad")
+  loc.stack_crop = crop(loc.stack, crop_lim)
+  names(loc.stack_crop) = paste0(names(loc.stack), "_loc")
+  glm.list[[i]]=ctmc2glm(ctmc,loc.stack_crop,grad.stack_crop)
+}
+```
+
+## Calculate the UD
+The UD is influenced by both the habitat itself and the movement of the animal through the habitat. For example, cells with quality habitat will attract animals to them repeatedly (leading to an increase in UD) and conditions which cause an animal to remain within a quality cell (ie. slow movement) will cause an increase in UD, and vice versa. After running the glm, a significantly negative coefficient value for bathy.loc, for example, would suggest that the animal moves more slowly in the presence of vegetation.
+
+
+```{r}
+for(i in 1:36){
+  idx.0=which(glm.list[[i]]$tau<10^-5)
+  if(length(idx.0)>0){
+    glm.list[[i]]=glm.list[[i]][-idx.0,]
+  }
+  glm.list[[i]]$t=glm.list[[i]]$t-min(glm.list[[i]]$t)
+}
+
+glm.data=glm.list[[1]]
+for(i in 1:36){
+  glm.data=rbind(glm.data,glm.list[[i]])
+}
+
+names(grad.stack) = paste0(names(grad.stack), "_grad")
+names(loc.stack) = paste0(names(loc.stack), "_loc")
+
+fit=glm(z~d2trees_loc+d2clearing_loc+d2sleep_grad+d2clearing_grad , weights=rep(1/36,nrow(glm.data)),family="poisson",offset=log(tau),data=glm.data)
+beta.hat.SWL=coef(fit) 
+beta.se.SWL=summary(fit)$coef[,2]
+summary(fit)
+
+
+
+```
+
+Then we calculate the rate matrix
+```{r}
+R <- ctmcmove::get.rate.matrix(fit, loc.stack, grad.stack)
+pitt <- ctmcmove::get.UD(R, method = "limit", maxiter = 10000)
+UD.rast=intercept
+values(UD.rast) <- pitt
+
+writeRaster(UD.rast, "/home/sara/Documentos/Third_Rotation/BaboonsV2/UD/UDrast.tif", overwrite=TRUE)
+writeRaster(log(UD.rast), "/home/sara/Documentos/Third_Rotation/BaboonsV2/UD/log_UDrast.tif", overwrite=TRUE)
+
+ud1df <- as.data.frame(raster::rasterToPoints(UD.rast));
+names(ud1df) <- c('x','y','Density') 
+ud1 <- ggplot(ud1df,aes(x/1000,y/1000)) + geom_raster(aes(fill=log(Density))) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='UD',fill='Density')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+ud1
+```
+
+
+# References
+
+Wilson K, Hanks E, Johnson D. Estimating animal utilization densities using continuous‐time Markov chain models. Methods Ecol Evol. 2018;9:1232–1240. https://doi.org/10.1111/2041-210X.12967
+
+Strandburg-Peshkin A, Farine DR, Couzin ID, Crofoot MC (2015) Shared decision-making drives collective movement in wild baboons. Science 348–6241: 1358–1361. doi:10.1126/science.aaa5099
