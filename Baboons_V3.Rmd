@@ -1,0 +1,517 @@
+---
+title: "Baboons_V---
+title: "Project: Baboons"
+author: "Sara Zapata-Marin"
+date: "20 de agosto de 2018"
+output: html_document
+bibliography: bibliography.bib
+---
+# Table of contents 
+1. [Background](#background)
+2. [Model Description](#model-description)
+3. [Set Global Environment and load the telemetry data](#set-global-environment-and-load-the-telemetry-data)
+4. [Create and load covariate rasters](#create-and-load-covariate-rasters)
+5. [Estimate the CTMC model parameters using ctmcmove](#estimate-the-ctmc-model-parameters-using-ctmcmove)
+6. [Calculate the UD](#calculate-the-ud)
+7. [References](#references)
+
+
+## Background
+
+In 2015 Strandburg [@Strandburg-Peshkin2015] published an article featuring the tracking information of a troop of 25 wild olive baboons (*Papio anubis*) at Mpala Centre in Laikipia, Kenya from 1 August- 2 September 2012.
+
+Then in 2017 Strandburg [@Strandburg-Peshkin2017] published an article about how habitat structure and social interactions influenced the collective movement of the troop by integrating the simulaneous, high-resolution (quasi-continuous) tracking of wild baboons with a 3D reconstruction of their habitat to identify the key drivers of baboon movement. They used the following features:
+
+- **Environment density:** Fraction of non-ground (vegetated) area within a 2.5m radius of potential location
+
+- **Social density:** Fraction of all troop mates within a 4.25 radius of a potential location
+
+- **Sleep site direction:** Direction of a potential location relative to the sleep site, ranges from -1 (directly away) to 1 (directly toward), fir as interaction with time of day.
+
+- **Roads:** Whether a potential location is on a road (1) or not (0). Fit as an interaction with whether the baboon's previous location was on a road.
+
+- **Recently-used space:** Number of other baboos that hace occupied a potential location within the past 4.5 minutes.
+
+- **Ever-used space:** Whether a potential locatuon was ever occupied by another baboon across the entire dataset.
+
+- **Animal paths:** Whether a potential location is on an animal path (1) or not (0), fit as interaction with whether baboon's previous location was on a path. 
+
+- **Visible neighbors:** Fraction of other group members visible from a potential location.
+
+- **Slope:** Change in elevation to a potential location from the baboon's previous location.
+
+The general steps that they followed are briefly described in the next figure taken from their article
+
+
+![Strandburg 2017 Model ](https://iiif.elifesciences.org/lax:19505%2Felife-19505-app1-fig5-v2.tif/full/617,/0/default.webp)
+
+**Description:** Analysis pipeline for determining which features are most important in predicting individual baboons’ decisions, using a step selection analysis and multi-model infer- ence. To model a given baboon, its trajectory is first broken up into a series of steps using spatial discretization (A). Black line shows the full trajectory, and red lines show the spatially discretized steps. Square encloses one step. (B) For each step, the real location chosen by the baboon (red) is then compared to a set of alternative options (black), with these options drawn from that individual’s empirical step length / turning angle distribution (C). Features (such as whether the location is on a road, the vegetation density, how many baboons are within a certain range, etc.) are then extracted from each potential location, across all steps (D). A conditional logistic regression model predicting the probability that the baboon chose each alternative option based on the features of all options (E) is then fit using maximum likelihood. (F) Models containing all possible combinations of features are fit in this way, and their AIC scores computed. The relative importance of each feature in the models is then determined by computing the AIC weight of each feature across all models. Features that are present in many of the best models receive the largest weights.
+
+Although, this is a really detailed article that show the interaction between the baboons and the environment, the 3D reconstruction and the baboons tracking data were gathered in different periods and the data used for the reconstruction doesn't cover the entirity of the land used by the baboons according to the 14 days tracking data.
+
+We decided to partially implement the Continuous-time Markov Chain (CTMC) to telemetry data as described by Hanks [@Hanks2016] using the `ctmc` package developed for R (https://cran.r-project.org/package=ctmcmove)
+
+In our case we want the limiting distribution of the Markov Chain which will give us the utilization density (UD) for tha animal following the CTMC model. By modelling continuous-time movement through the grid we can infer the effect of the environment on the animal movement and predict a UD over the available area even if the animal have not been seen there before, just by evaluating the preferential use of space.
+
+We follow Wilson [@Wilson2018] steps to calculate the utilization density using `ctmc`.
+
+
+## Model Description
+This is a brief description of CTMC model developed by Ephraim Hanks [@Hanks2015, @Hanks2016].
+
+Let $X(t)$ denote the location at time *t*, but the locations can take just certain values so $X(t) \in \{1,2,...,N\}$ where *N* denotes the number of cells in our grid.
+
+A continuous time movement path is defined as a sequence of locations that the animal passes through $\{c_1, c_2,...,c_T\}$ and this is called the *embedded chain*, $\{t_1,t_2,...t_N\}$ are the *transition times* and $\{\tau_1,\tau_2,...,\tau_T\}$ are the *residence times * where each $\tau_k = t_{k+1}-t_{k}$ is the time spent in $c_k$, the *k-th* location visited by the animal.
+
+The CTMC statistical is written in terms of transition rates $\{\alpha_{ij} \geq 0, i \neq j; i=1,...,N; j=1,...,N\}$ which are parameters that control movement between cells. If it is impossible to move from location *i* to location *j* then $\alpha_{ij} = 0$.
+
+The residence time in node $c_k=i$ is exponentially-distributed with the a rate equal to 
+\[\tau_k = (\text{residence time in node } c_k = i)=\text{Exp}\sum_{j=1}^N \alpha_{ij}\].
+
+Then, the mean residence time in node *i* is $\mathbb{E} (\tau_k | c_k=i)=\frac{1}{\sum_{j=1}^N \alpha_{ij}}$. And the probability of transitioning between neighboring cells from cell *i* is
+\[\mathbb{P}(c_{k+1}=l|c_k=i)=\frac{\alpha_{il}}{\sum_{j=1}^N \alpha_{ij}}\]
+
+Hanks separate the covariates into two categories, the ones that influence motility or speed $(\textbf{m}_1,\textbf{m}_2,...,\textbf{m}_L)$ and the ones that influence direction $(\textbf{d}_1,\textbf{d}_2,...,\textbf{d}_P)$. The directional covariates are represented by a gradient of a potential surface which accordint to Hanks: "The gradient of $\textbf_{d}_p$ at $(x_m,y_m)$ is a vector pointing in the direction of steepest increase in $\textbf{d}_p$ at the that point in space".
+
+*"The motility covariates control the desire of an animal to stay in (or leave) a cell due to the current habitat (i.e., speed of movement through a cell), while directional drivers control attraction (or repulsion) to neighbour- ing cells due to improvement (degradation) in the neighbouring habitat relative to the current habitat."* [@Wilson2018]
+
+
+
+### Directional Covariates
+
+Let $\textbf{e}_{ij}=(x_j-x_i, y_j-y_i)$  be a vector pointing in the direction that an animal moves if it transitions from *i* to *j*, and let $g_{pi}$ be the direction of steepest ascent of the covariate $\textbf{d}_p$ at node *i*. So the dot product
+\[q_{pij}=\textbf{e'}_{ij}\textbf{g}_{pi}=(x_j-x_i)g_{pmx}+(y_j-y_i)g_{pmy}\]
+will be positive if they are pointing in the same direction, zero if there is a right angle between them and negative if they point in opposite directions. This product captures the correspondance between a potentian movement and the gradient of a covariate, and can model the movement bias in the same or opposite directions of increasing levels of a covariate (such as distance in the case of the baboons).
+
+### CTMC
+
+The CTMC allows model the transition rates as a loglinear function of both the motility and directional covariates.
+
+\[\alpha_{ij}=\begin{cases} 
+      exp\{\sum_{k=1}^L \delta_k m_{ki}+\sum_{p=1}^P \gamma_p \textbf{e'}_{ij}\textbf{g}_{pi} \} & \text{if $i$ and $j$ are neighbors} \\
+      0 & \text{otherwise}
+   \end{cases}
+   \]
+
+### Statistical Inference for CTMC Model Parameters
+
+The likelihood of the observed CTMC path $(\textbf{c},\boldsymbol{\tau})$, is given by the product of the density of the embedded chain and the residence times
+
+\[f(\textbf{c},\boldsymbol{\tau}|\boldsymbol{\delta},\boldsymbol{\gamma}) = \prod_{t=1}^T \left[ \left( \sum_{k=1}^M \alpha_{c_tk}exp\left(-\tau_t\sum_{k=1}^M \alpha_{c_tk}\right) \right)\right]\times \left[\prod_{t=1}^T \frac{\alpha_{c_tc_{t+1}}}{\sum_{k=1}^M \alpha_{c_tk}}  \right]\]
+where the transition rates are a function of raster covariates and regression parameters $\{ \boldsymbol{\delta}, \boldsymbol{\gamma}\}$.
+
+**Tricky part for me
+
+So Hanks [@Hanks2015] introduced a new set of auxiliary variables $\{z_{tk}\}$ to facilitate maximizing the likelihood. (why???)
+
+So, for each cell they create $\{z_{tk}, k=1,...,N\}$ so, each $z_{tk}$ is zero except for $z_{tc_{t+1}}$, the latent variable corresponding to $c_{t+1}$, the next grid cell in the embedded chain
+
+\[z_{tk}=\begin{cases} 
+      1 & \text{if $k=c_{t+1}$ } \\
+      0 & \text{if $k\neq c_{t+1}$ } 
+   \end{cases}
+   \]
+
+Apparently in that article they showed that maximizing the likelihood of the CTMC path is equivalent to maximizing the likelihood of a Poisson regression with canonical log link?, where $z_{tk}$ as tge response, $\textbf{x}_{c_tk}$ are the covariates in the linear predictor, and $log(\tau_t)$ in an offset 
+
+\[z_{tk}\stackrel{iid}{\sim}Pois(\tau_t\alpha_{c_tk}), \quad t=1,2,...,T; \quad k = 1,2,...,N\]
+
+
+So the likelihood would be given by
+
+\[f(\textbf{z}\boldsymbol{\tau}|\boldsymbol{\beta}) \propto  \prod_{t=1}^T \prod_{k=1}^M(\alpha_{c_tk}^{z_{tk}}exp\{-\tau_t\alpha_{c_tk}\})\]
+
+So in the end it means that the CTMC parameters can be estimated using standart Poisson GLM software.
+
+### Inference from Discrete Observation in Time
+
+Most of the telemetry data consists on K discrete points in time denoted by Hanks like $\{(x_i,y_i,t_i), t_i=t_1,t_2,...,t_K\}$.
+
+Once discretized to raster cells $\{c_i, i=1,2,...,K\}$, the likelihood of the observed data is 
+\[\prod_{i=1}^K\mathbb{P}_{c_kc_{k+1}}(t_{k+1}-t_k)\]
+where $\mathbb{P}_{ij}(\Delta t)= P(X(t + \Delta t)=j|X(t)=i)$.
+
+Because this implies matrix exponentiation they used stochastic imputation of continuous-time continuous-space paths linking the available locations.
+
+So they impute continuous-time paths from the posterior distributon of a movement model fit to the telemetry data.
+
+
+
+
+### General steps suggested
+
+The general steps to follow suggested by Hanks are:
+
+1. Collect Telemetry data in the form of $\{(x_i, y_i, t_i), t_i=t_1, t_2, ...,t_k\}$.
+2. Collect and create covariate rasters. Each covariate defines either (or both) a motility covariate $\textbf{m}_k$ or a directional (gradient base) covariate $\textbf{d}_p$.
+3. Impute *P* continuous paths for each set of animal telemetry data using a suitable continuous-time movement model.
+4. Discretize each continuous path in space to obtain *P* CTMC paths $\{(\textbf{c},\boldsymbol{\tau})^{(1)},(\textbf{c},\boldsymbol{\tau})^{(2)},...,(\textbf{c},\boldsymbol{\tau})^{(P)}\}$, and the corresponding covariates $\{m_{ki},\textbf{e'}_{ij}\textbf{g}_{pi}\}$.
+5. Calculate the UD
+
+**this is partially a copy-paste from @Hanks2016
+
+## Set Global Environment and load the telemetry data
+First, we load all the libraries that we will need.
+Since some parts of the code take a while to run we also use a library called `beepr` that will make a noise when it's done running (for more information visit: https://cran.r-project.org/package=beepr).
+
+```{r, include=FALSE, cache=FALSE}
+library(raster)
+library(dplyr)
+library(lubridate)
+library(ctmcmove)
+library(ggplot2)
+library(viridis)
+library(beepr)
+library(sp)
+library(rgdal)
+
+workdir <- "/home/sara/Documentos/Third_Rotation/BaboonsV2/"
+```
+
+There is a function inside another package developed by Hanks in the `ctds` package called FindCenters
+that let you adjust the time and space parameters to find the central points were the animal spends certain amount of time in a certain area, so we used it to calculate the Sleeping Site raster and also another one for the Food Resources but that one was not used. There are some minor changes to the function to make it work with our data format.
+
+
+```{r function centers, echo=FALSE}
+FindCenters = function(ani, max.dist= 8, max.time.dist = 8, mintime = min(ani$GMT),maxtime = max(ani$GMT),min.time.dist=5){
+  
+  #ani$GMT <- ymd_hms(ani$GMT) %>% strftime(format="%H:%M:%S")
+  # split them by days first
+  coords=data.frame(ani$X,ani$Y)
+  t = ani$GMT
+  t.idx= seq(TRUE,nrow(ani))
+  # Distance between locations
+  dmat = as.matrix(dist(coords))
+  diag(dmat) <- NA
+  dmat[upper.tri(dmat)] <- NA
+  
+  # Intervals in time
+  reference <- as.POSIXct("2012-07-01 12:00:00")
+  dist_min <- difftime(ani$GMT,reference, units = "mins")
+  dmat.time <- as.matrix(dist(dist_min))
+  diag(dmat.time) <- NA
+  dmat.time[upper.tri(dmat.time)] <- NA
+  
+  
+  N=ncol(dmat)
+  n = ncol(dmat.time)
+  #ones = matrix(1, n, n)
+  pairs=which(dmat<max.dist & min.time.dist < dmat.time & dmat.time<max.time.dist,arr.ind=T)
+  pts=unique(pairs[,1])
+  pairs.cluster=rep(0,nrow(pairs))
+  points.cluster=rep(0,nrow(coords))
+  
+  cluster=list()
+  
+  no.pairs=0
+  clust.index=1
+  while(no.pairs==0){
+    stop.idx=0
+    seed=which(pairs.cluster==0)[1]
+    c.idx=as.vector(pairs[seed,])
+    pairs.cluster[which(pairs[,1]==c.idx[1] & pairs[,2]==c.idx[2])] <- clust.index
+    while(stop.idx==0){      
+      points.cluster[c.idx] <- clust.index
+      clust.mean=apply(coords[c.idx,],2,mean)
+      d.clust=as.matrix(dist(rbind(clust.mean,coords)))[-1,1]
+      d.clust[points.cluster>0] <- NA
+      candidate=which.min(d.clust)  
+      if(length(candidate)>0 & d.clust[candidate]<max.dist & difftime(t[candidate],t[c.idx[length(c.idx)]],units = "mins")<max.time.dist & difftime(t[candidate],t[c.idx[length(c.idx)]],units = "mins")>min.time.dist){
+        c.idx=c(c.idx,candidate)
+        points.cluster[candidate] <- clust.index
+      }
+      else{
+        stop.idx=1
+        cluster[[clust.index]] <- clust.mean        
+      }
+    }
+    pairs.cluster[apply(matrix(pairs %in% c.idx,ncol=2),1,sum)>0] <- clust.index
+    clust.index=clust.index+1
+    if(length(which(pairs.cluster==0))==0){
+      no.pairs=1
+    }
+  }
+  
+  clusters=c(NA,NA)
+  for(j in 1:length(cluster)){
+    clusters=rbind(clusters,cluster[[j]])
+  }
+  clusters=clusters[-1,]
+  
+  list(clusters=clusters,coords=coords,points.cluster=points.cluster)
+  
+  
+}
+
+```
+
+In this first approach we use the data from six baboons during 6 non consecutive days because those days are complete for each of them, so we have a continuous path and we don't have to do imputation. 
+The data has already been split in another script so here we just read the output file called `6Days6Baboons.csv`.
+
+```{r load file}
+
+locs <- read.csv(paste0(workdir,"6Days6Baboons.csv"))
+ # Set the GMT column which has day and time to be in POSIXct format.
+locs$GMT <- as.POSIXct(locs$GMT) %>%  ymd_hms()
+days <- levels(locs$Date)
+baboons <- levels(as.factor(locs$Deploy_ID))
+
+names(locs) <- c("event.id","GMT","X","Y","Deploy_ID","Date" )
+
+head(locs)
+
+
+```
+
+Since our data is in long-lat format to use the functions in `ctmcmove` we find convenient to change it to the UTM system. We do that with the `spTransform` in the `sp` package.
+```{r coordinate transform}
+
+coordinates(locs) <- c("X", "Y")
+proj4string(locs) <- CRS("+proj=longlat +datum=WGS84")  ## for example
+
+locs <- spTransform(locs, CRS("+proj=utm +zone=37 +south=T  ellps=WGS84"))
+locs <- as.data.frame(locs)
+```
+
+Then, since the data is too heavy and we just need a constant interval we read the data at different intervals but just to calculate the sleeping sites.
+```{r read by intervals}
+interval <- 30
+intervals <- locs[seq(1,nrow(locs), interval),]
+
+#Define the time when the baboons are sleeping
+intervals_sleep <- intervals[hour(intervals$GMT)==2 | hour(intervals$GMT)==3 | hour(intervals$GMT)== 14 ,]
+
+```
+
+
+
+## Create and load covariate rasters
+
+The following rasters were obtained by Dr. Raja Sengupta using tools from ArcGIS and a satellite image from Google Maps for the same year the tracking data was gathered.
+
+We have the distance to trees, distance to clear areas and distance to trails. In general we are dealing with gradient rasters here.
+
+```{r rasters}
+rasterdir <- "/home/sara/Documentos/Third_Rotation/BaboonsV2/layers_lower/"
+
+d2trees <- raster(paste0(rasterdir,"Distancefromtrees.tif"))
+projection(d2trees) <- "+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs "
+
+# To visualize it using ggplot 
+D2trees <- as.data.frame(raster::rasterToPoints(d2trees));
+names(D2trees) <- c('x','y','Distance')
+trees <- ggplot(D2trees,aes(x/1000,y/1000)) + geom_raster(aes(fill=Distance)) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='Distance to trees',fill='Distance')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+
+
+d2clearing <- raster(paste0(rasterdir,"Distancefromclearing.tif"))
+projection(d2clearing) <- "+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs "
+
+D2clearing <- as.data.frame(raster::rasterToPoints(d2clearing));
+names(D2clearing) <- c('x','y','Distance')
+clearing <- ggplot(D2clearing,aes(x/1000,y/1000)) + geom_raster(aes(fill=Distance)) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='Distance to clearing',fill='Distance')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+
+d2trail <- raster(paste0(rasterdir,"Distancefromtrail.tif"))
+projection(d2trail) <- "+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs "
+
+
+D2trail <- as.data.frame(raster::rasterToPoints(d2trail));
+names(D2trail) <- c('x','y','Distance')
+
+trail <- ggplot(D2trail,aes(x/1000,y/1000)) + geom_raster(aes(fill=Distance)) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='Distance to trail',fill='Distance')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+
+
+
+```
+
+
+Now a dummy raster is created, this will help us calculate the distance to sleeping sites
+```{r}
+intercept <- d2trees
+names(intercept) <- "intercept"
+values(intercept) <- 1
+```
+
+Then we calculate the food resources and sleeping sites according to the time the baboons spend in certain sites and the distance between each consecutive point.
+
+ACHTUNG! this takes a lot of time to run
+
+```{r}
+
+# sleep_cl=FindCenters(intervals_sleep,max.dist=0.3,max.time.dist=1800,min.time.dist=3)
+# 
+# sleepsite <- intercept
+# values(sleepsite) <- NA
+# cent.cells=cellFromXY(sleepsite,sleep_cl$clusters)
+# values(sleepsite)[cent.cells] <- 0
+# d2sleep=distance(sleepsite)
+# projection(d2sleep) <- CRS("+proj=utm +zone=37 +south +datum=WGS84 +units=m +no_defs ")
+#
+# 
+# # We write a file to save the raster and the location of the clusters.
+# 
+# writeRaster(d2sleep, "/home/sara/Documentos/Third_Rotation/BaboonsV2/layers/distance_to_sleep.tif", overwrite=TRUE)
+# write.csv(sleep_cl$clusters,"/home/sara/Documentos/Third_Rotation/BaboonsV2/points/sleep_clusters.csv" )
+
+
+d2sleep <- raster("/home/sara/Documentos/Third_Rotation/BaboonsV2/layers/distance_to_sleep.tif")
+
+D2sleep <- as.data.frame(raster::rasterToPoints(d2sleep));
+names(D2sleep) <- c('x','y','Distance')
+ds <- ggplot(D2sleep,aes(x/1000,y/1000)) + geom_raster(aes(fill=log(Distance))) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='Distance to sleep',fill='Distance')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+ds
+```
+
+So until now, these are our gradient intercepts:
+```{r}
+
+trail
+trees
+clearing
+ds
+plot(intercept)
+
+```
+
+
+Now we load the static covariates
+
+```{r}
+trees <- raster("/home/sara/Documentos/Third_Rotation/BaboonsV2/layers/trees.tif")
+clearing <- raster("/home/sara/Documentos/Third_Rotation/BaboonsV2/layers/clearing.tif")
+trails <- raster("/home/sara/Documentos/Third_Rotation/BaboonsV2/layers/trails.tif")
+
+plot(stack(trees,clearing,trails))
+
+```
+
+
+Then we prepare two stacks one with the directional covariates (grad.stack) and another one with motility covariates (loc.stack). 
+
+Here is the only change from the other version, we will consider the position of trees and trails instead of the distance.
+```{r}
+
+
+loc.stack = stack(trees, clearing, trails)
+names(loc.stack) <- c("trees", "clearing", "trails")
+
+
+grad.stack=stack(  d2sleep,  d2clearing, d2trail, d2trees)
+names(grad.stack) <- c("d2sleep","d2clearing", "d2trail", "d2trees")
+
+```
+But before running the model we have to test for colinearity
+
+# Correlation
+
+In this part we are going to compute correlation between the layers, but first we have to make a stack with all of them
+
+```{r}
+predictors <- stack(intercept, d2trail, d2trees, d2sleep, d2clearing, trees, trails, clearing)
+
+presence <- locs[,c(5,6)]
+
+presvals <- extract(predictors, presence)
+
+# Get random background points 
+backgr <- randomPoints(predictors, 1000000)
+absvals <- extract(predictors, backgr)
+pb <- c(rep(1, nrow(presvals)),rep(0, nrow(absvals)))
+
+
+sdmdata <- data.frame(cbind(pb, rbind(presvals, absvals)))
+summary(sdmdata)
+pairs(sdmdata[,3:6], cex=0.1, fig=TRUE)
+
+
+
+```
+
+## Estimate the CTMC model parameters using ctmcmove
+
+** I am uncertain about this part ** 
+
+Hanks uses imputation to simulate multiple different random walks using the available telemetry locations, so they simulate around 6 different paths. In this case I have different animals with continuous paths so I am taking those paths as the independent ones instead of doing imputation which in this case is not necessary since the data is already continuous.
+
+So, an CTMC Model is fitted for each path (in this case each path is each different day and also a different baboon), the discrete space path is extracted along with cell residence times using path2ctmc() in the ctmcmove package. Hanks et al. (@Hanks2015) showed that inference on CTMC parameters can be made by rewriting the CTMC likelihood into a form proportional to a Poisson GLM likelihood. The necessary transformation of each CTMC path is faciliated through ctmc2glm().
+
+Since now we have 6 baboons in 6 different days we split them so each one is a different path
+```{r}
+k =1
+for (i in baboons){
+  for (j in days){
+    locs[locs$Date == j & locs$Deploy_ID == i, "path"] <- k
+    k = k + 1
+  }
+  
+}
+```
+
+```{r}
+
+glm.list=list()
+
+for(i in 1:36){
+  new_locs <- locs[locs$path==i,]
+  my_path <- list(xy=as.matrix(new_locs[,5:6]), t=as.vector(1:nrow(new_locs)))
+  crop_lim = extent(c(range(my_path$xy[,1])+c(-5000,5000), range(my_path$xy[,2])+c(-5000,5000)))
+  crop_intercept = crop(intercept, crop_lim)
+  ctmc=path2ctmc(my_path$xy,my_path$t,crop_intercept)
+  grad.stack_crop = crop(grad.stack,crop_lim)
+  names(grad.stack_crop) = paste0(names(grad.stack), "_grad")
+  loc.stack_crop = crop(loc.stack, crop_lim)
+  names(loc.stack_crop) = paste0(names(loc.stack), "_loc")
+  glm.list[[i]]=ctmc2glm(ctmc,loc.stack_crop,grad.stack_crop)
+}
+```
+
+## Calculate the UD
+The UD is influenced by the habitat and the movement of the animal through the habitat. As we explained at the beginning what we want is the 
+
+```{r}
+for(i in 1:36){
+  idx.0=which(glm.list[[i]]$tau<10^-5)
+  if(length(idx.0)>0){
+    glm.list[[i]]=glm.list[[i]][-idx.0,]
+  }
+  glm.list[[i]]$t=glm.list[[i]]$t-min(glm.list[[i]]$t)
+}
+
+glm.data=glm.list[[1]]
+for(i in 1:36){
+  glm.data=rbind(glm.data,glm.list[[i]])
+}
+
+names(grad.stack) = paste0(names(grad.stack), "_grad")
+names(loc.stack) = paste0(names(loc.stack), "_loc")
+
+fit=glm(z~ d2sleep_grad+ d2clearing_grad+ d2trail_grad+d2trees_grad+ trees_loc+ clearing_loc+ trails_loc , weights=rep(1/36,nrow(glm.data)),family="poisson",offset=log(tau),data=glm.data)
+beta.hat.SWL=coef(fit) 
+beta.se.SWL=summary(fit)$coef[,2]
+summary(fit)
+```
+
+
+Then we calculate the rate matrix and the stationary distribution.
+```{r}
+R <- ctmcmove::get.rate.matrix(fit, loc.stack, grad.stack)
+pitt <- ctmcmove::get.UD(R, method = "limit", maxiter = 10000)
+UD.rast=intercept
+values(UD.rast) <- pitt
+
+#writeRaster(UD.rast, "/home/sara/Documentos/Third_Rotation/BaboonsV2/UD/UDrast.tif", overwrite=TRUE)
+writeRaster(log(UD.rast), "/home/sara/Documentos/Third_Rotation/BaboonsV2/UD/log_UDrast.tif", overwrite=TRUE)
+
+# To plot it using ggplot
+ud1df <- as.data.frame(raster::rasterToPoints(UD.rast));
+names(ud1df) <- c('x','y','Density') 
+ud1 <- ggplot(ud1df,aes(x/1000,y/1000)) + geom_raster(aes(fill=log(Density))) + coord_equal() + scale_fill_gradientn(colours=viridis(100))+ theme_light()+ labs(x='Easting',y='Northing',title='UD',fill='Density')+ theme(axis.ticks.y = element_blank(), axis.ticks.x = element_blank(), legend.text=element_text(size=8), legend.title=element_text(size=10), panel.grid = element_blank())
+ud1
+beep(4)
+```
+
+## References
+3"
+author: "Sara Zapata-Marin"
+date: "28 de agosto de 2018"
+output: html_document
+---
